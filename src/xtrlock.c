@@ -30,6 +30,8 @@
 #include <math.h>
 #include <ctype.h>
 
+#include <linux/vt.h>
+
 #include "config.h"
 
 #include "lock.bitmap"
@@ -61,7 +63,8 @@ int screen;
 Colormap cmap;
 
 int bg_action = MBG;
-char *pam_module = "system-local-login";
+//char *pam_module = "system-local-login";
+char *pam_module = "system-auth";
 
 int auth_pam(char *user, char *password, char *module);
 
@@ -229,7 +232,7 @@ create_cursors(void)
     }
 }
 
-void
+int 
 lock(int mode)
 {
     XEvent ev;
@@ -238,11 +241,12 @@ lock(int mode)
     int clen, rlen=0, state = AUTH_NONE, old_state = -1;
     long goodwill= INITIALGOODWILL, timeout= 0;
     Window window;
+    int retry;
 
     display = XOpenDisplay(0);
     if (display == NULL) {
         err("cannot open display\n");
-        exit(1);
+        return 1;
     }
     XSetErrorHandler((XErrorHandler) handle_error);
     screen = DefaultScreen(display);
@@ -255,10 +259,14 @@ lock(int mode)
     XMapWindow(display,window);
     XRaiseWindow(display,window);
     XSync(display, False);
-    if (XGrabKeyboard(display, window, False, GrabModeAsync, GrabModeAsync,
-            CurrentTime) != GrabSuccess) {
-        err("can't grab keyboard\n");
-        exit(1);
+    retry = 0;
+    while (XGrabKeyboard(display, window, False, GrabModeAsync, GrabModeAsync, CurrentTime) != GrabSuccess) {
+        usleep(1000); // 1ms
+        retry++;
+        if (retry == 1000) {
+            err("can't grab keyboard\n");
+            return 1;
+        }
     }
   
     for (;;) {
@@ -268,10 +276,17 @@ lock(int mode)
             state = AUTH_NONE;
         if (old_state != state) {
             old_state = state;
-            if (XGrabPointer(display, window, False,
+            retry = 0;
+            while(XGrabPointer(display, window, False,
                     0, GrabModeAsync, GrabModeAsync, None,
-                    cursors[state].c, CurrentTime) != GrabSuccess)
-                err("can't grab pointer\n");
+                    cursors[state].c, CurrentTime) != GrabSuccess) {
+                usleep(1000);
+                retry++;
+                if (retry == 1000) {
+                    err("can't grab pointer\n");
+                    return 1;
+                }
+            }
         }
 
         XNextEvent(display,&ev);
@@ -297,7 +312,7 @@ lock(int mode)
                     0, GrabModeAsync, GrabModeAsync, None,
                     cursors[AUTH_FAILED].c, CurrentTime);
                 if (passwordok(rbuf))
-                    exit(0);
+                    return 0;
                 XBell(display,0);
                 rlen= 0;
                 if (timeout) {
@@ -341,6 +356,8 @@ help()
 int main(int argc, char *argv[])
 {
     int opt;
+    int fp;
+    int ret;
 
     while ((opt = getopt(argc, argv, "b:p:h")) != -1) {
         switch (opt) {
@@ -369,6 +386,12 @@ int main(int argc, char *argv[])
             exit(1);
         }
     }
-    lock(bg_action);
-    return 0;
+    fp = open("/dev/tty0", O_RDWR);
+    ioctl(fp, VT_LOCKSWITCH);
+
+    ret = lock(bg_action);
+
+    ioctl(fp, VT_UNLOCKSWITCH);
+    close(fp);
+    return ret;
 }
